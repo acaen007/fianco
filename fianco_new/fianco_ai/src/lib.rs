@@ -152,11 +152,11 @@ fn evaluate_board(board: &Array2<i32>, player: i32) -> i32 {
     }
 
     // Detect and evaluate unstoppable pawns
-    // let ai_unstoppable_pawns = count_unstoppable_pawns(board, player);
-    // let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player);
+    let ai_unstoppable_pawns = count_unstoppable_pawns(board, player);
+    let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player);
 
-    // score += ai_unstoppable_pawns * UNSTOPPABLE_PAWN_BONUS;
-    // score += opponent_unstoppable_pawns * UNSTOPPABLE_PAWN_PENALTY; // Note the sign
+    score += ai_unstoppable_pawns * UNSTOPPABLE_PAWN_BONUS;
+    score += opponent_unstoppable_pawns * UNSTOPPABLE_PAWN_PENALTY;
 
     score
 }
@@ -304,7 +304,7 @@ fn count_unstoppable_pawns(board: &Array2<i32>, player: i32) -> i32 {
 
     for ((row, col), &piece) in board.indexed_iter() {
         if piece == player {
-            if is_unstoppable_pawn(board, (row as isize, col as isize), player) {
+            if is_unstoppable_pawn(board, (row, col), player) {
                 count += 1;
             }
         }
@@ -313,114 +313,40 @@ fn count_unstoppable_pawns(board: &Array2<i32>, player: i32) -> i32 {
     count
 }
 
-fn is_unstoppable_pawn(board: &Array2<i32>, pawn_pos: (isize, isize), player: i32) -> bool {
-    let min_steps_to_goal = calculate_min_steps_to_goal(pawn_pos, player);
-    let min_steps_for_opponent_to_block = calculate_min_steps_for_opponent_to_block(board, pawn_pos, player);
+fn is_unstoppable_pawn(board: &Array2<i32>, pawn_pos: (usize, usize), player: i32) -> bool {
+    let (row_pawn, col_pawn) = pawn_pos;
+    let row_pawn = row_pawn as isize;
+    let col_pawn = col_pawn as isize;
+    let row_goal = if player == BLACK { BOARD_SIZE as isize - 1 } else { 0 };
+    let direction = if player == BLACK { 1 } else { -1 };
 
-    min_steps_to_goal < min_steps_for_opponent_to_block
-}
+    let steps_to_goal = (row_goal - row_pawn).abs();
 
-fn calculate_min_steps_to_goal(pawn_pos: (isize, isize), player: i32) -> isize {
-    let (row, _) = pawn_pos;
+    // For each opponent pawn
+    for ((row_opp, col_opp), &piece) in board.indexed_iter() {
+        if piece == -player {
+            let row_opp = row_opp as isize;
+            let col_opp = col_opp as isize;
 
-    if player == BLACK {
-        (BOARD_SIZE as isize - 1) - row
-    } else {
-        row
-    }
-}
+            // Check if opponent pawn is ahead of the pawn
+            let relative_row = (row_opp - row_pawn) * direction;
+            if relative_row <= 0 {
+                // Opponent pawn is not ahead
+                continue;
+            }
 
-fn calculate_min_steps_for_opponent_to_block(board: &Array2<i32>, pawn_pos: (isize, isize), player: i32) -> isize {
-    let opponent = -player;
-    let mut min_steps = std::isize::MAX;
+            let steps_to_opp = relative_row;
+            let col_diff = (col_opp - col_pawn).abs();
 
-    for ((opp_row, opp_col), &piece) in board.indexed_iter() {
-        if piece == opponent {
-            if let Some(steps) = calculate_steps_to_intercept(board, pawn_pos, (opp_row as isize, opp_col as isize), player) {
-                if steps < min_steps {
-                    min_steps = steps;
-                }
+            if col_diff <= steps_to_opp {
+                // Opponent pawn is within triangle
+                return false; // Pawn is stoppable
             }
         }
     }
 
-    min_steps
-}
-
-fn calculate_steps_to_intercept(
-    board: &Array2<i32>,
-    pawn_pos: (isize, isize),
-    opp_pawn_pos: (isize, isize),
-    player: i32,
-) -> Option<isize> {
-    let (pawn_row, pawn_col) = pawn_pos;
-    let (opp_row, opp_col) = opp_pawn_pos;
-
-    let pawn_direction = if player == BLACK { 1 } else { -1 };
-    let opponent_direction = -pawn_direction;
-
-    let pawn_steps_to_goal = calculate_min_steps_to_goal(pawn_pos, player);
-
-    for step in 1..=pawn_steps_to_goal {
-        // Pawn's future position at this step
-        let pawn_future_row = pawn_row + step * pawn_direction;
-        if pawn_future_row < 0 || pawn_future_row >= BOARD_SIZE as isize {
-            break;
-        }
-
-        // Potential interception positions
-        let interception_positions = vec![
-            (pawn_future_row, pawn_col),             // Direct block
-            (pawn_future_row, pawn_col - 1),         // Capture from left
-            (pawn_future_row, pawn_col + 1),         // Capture from right
-        ];
-
-        for opp_step in 1..=step {
-            let opp_future_row = opp_row + opp_step * opponent_direction;
-            let opp_future_cols = vec![opp_col - opp_step, opp_col, opp_col + opp_step];
-
-            for &opp_future_col in &opp_future_cols {
-                let opp_future_pos = (opp_future_row, opp_future_col);
-                if interception_positions.contains(&opp_future_pos) {
-                    // Check if path is clear
-                    if is_path_clear(board, opp_pawn_pos, opp_future_pos, -player) {
-                        return Some(opp_step);
-                    }
-                }
-            }
-        }
-    }
-
-    None
-}
-
-fn is_path_clear(
-    board: &Array2<i32>,
-    start_pos: (isize, isize),
-    end_pos: (isize, isize),
-    player: i32,
-) -> bool {
-    let (start_row, start_col) = start_pos;
-    let (end_row, end_col) = end_pos;
-
-    let row_step = (end_row - start_row).signum();
-    let col_step = (end_col - start_col).signum();
-
-    let mut row = start_row + row_step;
-    let mut col = start_col + col_step;
-
-    while (row, col) != end_pos {
-        if !is_within_bounds(row, col) {
-            return false;
-        }
-        if board[[row as usize, col as usize]] != EMPTY {
-            return false;
-        }
-        row += row_step;
-        col += col_step;
-    }
-
-    true
+    // No opponent pawns within the triangle
+    return true; // Pawn is unstoppable
 }
 
 
