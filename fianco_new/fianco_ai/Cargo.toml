@@ -1,0 +1,13 @@
+[package]
+name = "fianco_ai"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "fianco_ai"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21.0", features = ["extension-module"] }
+numpy = "0.21.0"
+ndarray = "0.15.6"
