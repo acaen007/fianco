@@ -1,6 +1,8 @@
 // src/lib.rs
-
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
+use pyo3::exceptions::PyKeyError;
+use pyo3::FromPyObject;
 use numpy::PyReadonlyArray2;
 use ndarray::Array2;
 
@@ -12,10 +14,16 @@ const WHITE: i32 = -1;
 const WIN_SCORE: i32 = 1_000_000;
 const LOSE_SCORE: i32 = -1_000_000;
 
-const UNSTOPPABLE_PAWN_BONUS: i32 = 5000;
-const UNSTOPPABLE_PAWN_PENALTY: i32 = -5000;
-
-
+#[derive(Debug, FromPyObject)]
+struct Weights {
+    piece_value: i32,
+    advancement_value: i32,
+    unstoppable_pawn_bonus: i32,
+    opponent_unstoppable_pawn_penalty: i32,
+    center_control_value: i32,
+    mobility_value: i32,
+    // Add more weights for new features
+}
 
 #[pyfunction]
 fn negamax(
@@ -23,11 +31,14 @@ fn negamax(
     board: PyReadonlyArray2<i32>,
     depth: i32,
     player: i32,
+    weights: &PyAny,
 ) -> PyResult<(Option<(i32, i32, i32, i32)>, i32, Vec<(i32, i32, i32, i32)>)> {
     let board_array = board.as_array().to_owned();
 
+    let weights: Weights = weights.extract()?;
+
     let (evaluation, best_move, pv) =
-        negamax_search(board_array, depth, player, i32::MIN + 1, i32::MAX - 1);
+        negamax_search(board_array, depth, player, i32::MIN + 1, i32::MAX - 1, &weights);
 
     let py_move = best_move.map(|(fr, fc, tr, tc)| {
         (fr as i32, fc as i32, tr as i32, tc as i32)
@@ -41,16 +52,20 @@ fn negamax(
     Ok((py_move, evaluation, py_pv))
 }
 
-
 fn negamax_search(
     board: Array2<i32>,
     depth: i32,
     player: i32,
     mut alpha: i32,
     beta: i32,
-) -> (i32, Option<(usize, usize, usize, usize)>, Vec<(usize, usize, usize, usize)>) {
+    weights: &Weights,
+) -> (
+    i32,
+    Option<(usize, usize, usize, usize)>,
+    Vec<(usize, usize, usize, usize)>,
+) {
     if depth == 0 || get_winner(&board).is_some() {
-        let evaluation = evaluate_board(&board, player);
+        let evaluation = evaluate_board(&board, player, weights);
         return (evaluation, None, Vec::new());
     }
 
@@ -75,6 +90,7 @@ fn negamax_search(
             -player,
             -beta,
             -alpha,
+            weights, // Pass weights recursively
         );
         let eval = -eval;
 
@@ -95,7 +111,6 @@ fn negamax_search(
     (max_eval, best_move, pv_line)
 }
 
-
 fn is_game_over(board: &Array2<i32>, player: i32) -> bool {
     // Check for victory condition: if a player's piece reaches the opponent's back row
     if player == BLACK {
@@ -114,8 +129,8 @@ fn is_game_over(board: &Array2<i32>, player: i32) -> bool {
     false
 }
 
-fn evaluate_board(board: &Array2<i32>, player: i32) -> i32 {
-    // Check if the current player has won
+fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
+    // Check for game over
     if let Some(winner) = get_winner(board) {
         if winner == player {
             return WIN_SCORE;
@@ -126,39 +141,72 @@ fn evaluate_board(board: &Array2<i32>, player: i32) -> i32 {
 
     let mut score = 0;
 
-    // Existing evaluation logic
-    for ((row, _col), &piece) in board.indexed_iter() {
+    // Iterate over the board and calculate features
+    for ((row, col), &piece) in board.indexed_iter() {
         if piece == player {
-            // Reward for each piece
-            score += 10;
-            // Reward for advancement
+            // Material value
+            score += weights.piece_value;
+
+            // Advancement
             let advancement = if player == BLACK {
                 row as i32
             } else {
                 (BOARD_SIZE - 1 - row) as i32
             };
-            score += advancement;
+            score += weights.advancement_value * advancement;
+
+            // Center control
+            if is_center_square(row, col) {
+                score += weights.center_control_value;
+            }
         } else if piece == -player {
-            // Penalty for opponent's pieces
-            score -= 10;
-            // Penalty for opponent's advancement
+            // Opponent's material value
+            score -= weights.piece_value;
+
+            // Opponent's advancement
             let advancement = if player == BLACK {
                 (BOARD_SIZE - 1 - row) as i32
             } else {
                 row as i32
             };
-            score -= advancement;
+            score -= weights.advancement_value * advancement;
+
+            // Opponent's center control
+            if is_center_square(row, col) {
+                score -= weights.center_control_value;
+            }
         }
     }
 
-    // Detect and evaluate unstoppable pawns
+    // Mobility
+    let mobility = get_mobility(board, player);
+    score += weights.mobility_value * mobility;
+
+    let opponent_mobility = get_mobility(board, -player);
+    score -= weights.mobility_value * opponent_mobility;
+
+    // Unstoppable pawns
     let ai_unstoppable_pawns = count_unstoppable_pawns(board, player);
     let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player);
 
-    score += ai_unstoppable_pawns * UNSTOPPABLE_PAWN_BONUS;
-    score += opponent_unstoppable_pawns * UNSTOPPABLE_PAWN_PENALTY;
+    score += ai_unstoppable_pawns * weights.unstoppable_pawn_bonus;
+    score += opponent_unstoppable_pawns * weights.opponent_unstoppable_pawn_penalty;
 
     score
+}
+
+
+fn is_center_square(row: usize, col: usize) -> bool {
+    // Define center squares (e.g., the middle 3x3 squares for a 9x9 board)
+    let center_start = BOARD_SIZE / 3;
+    let center_end = BOARD_SIZE - center_start;
+
+    row >= center_start && row < center_end && col >= center_start && col < center_end
+}
+
+fn get_mobility(board: &Array2<i32>, player: i32) -> i32 {
+    let moves = get_valid_moves(board, player);
+    moves.len() as i32
 }
 
 
@@ -355,7 +403,7 @@ fn is_within_bounds(row: isize, col: isize) -> bool {
 }
 
 #[pymodule]
-fn fianco_ai(py: Python, m: &PyModule) -> PyResult<()> {
+fn fianco_ai(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(negamax, m)?)?;
     Ok(())
 }
