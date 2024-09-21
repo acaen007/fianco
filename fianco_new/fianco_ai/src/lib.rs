@@ -11,18 +11,20 @@ const EMPTY: i32 = 0;
 const BLACK: i32 = 1;
 const WHITE: i32 = -1;
 
-const WIN_SCORE: i32 = 1_000_000;
-const LOSE_SCORE: i32 = -1_000_000;
+const WIN_SCORE: f64 = 1_000_000.0;
+const LOSE_SCORE: f64 = -1_000_000.0;
+
 
 #[derive(Debug, FromPyObject)]
 struct Weights {
-    piece_value: i32,
-    advancement_value: i32,
-    unstoppable_pawn_bonus: i32,
-    opponent_unstoppable_pawn_penalty: i32,
-    center_control_value: i32,
-    mobility_value: i32,
-    // Add more weights for new features
+    piece_value: f64,
+    advancement_value: f64,
+    unstoppable_pawn_bonus: f64,
+    opponent_unstoppable_pawn_penalty: f64,
+    center_control_value: f64,
+    mobility_value: f64,
+    edge_pawn_bonus: f64,
+    // Add more weights as needed
 }
 
 #[pyfunction]
@@ -32,13 +34,13 @@ fn negamax(
     depth: i32,
     player: i32,
     weights: &PyAny,
-) -> PyResult<(Option<(i32, i32, i32, i32)>, i32, Vec<(i32, i32, i32, i32)>)> {
+) -> PyResult<(Option<(i32, i32, i32, i32)>, f64, Vec<(i32, i32, i32, i32)>)> {
     let board_array = board.as_array().to_owned();
 
     let weights: Weights = weights.extract()?;
 
     let (evaluation, best_move, pv) =
-        negamax_search(board_array, depth, player, i32::MIN + 1, i32::MAX - 1, &weights);
+        negamax_search(board_array, depth, player, f64::NEG_INFINITY, f64::INFINITY, &weights);
 
     let py_move = best_move.map(|(fr, fc, tr, tc)| {
         (fr as i32, fc as i32, tr as i32, tc as i32)
@@ -56,11 +58,11 @@ fn negamax_search(
     board: Array2<i32>,
     depth: i32,
     player: i32,
-    mut alpha: i32,
-    beta: i32,
+    mut alpha: f64,
+    beta: f64,
     weights: &Weights,
 ) -> (
-    i32,
+    f64,
     Option<(usize, usize, usize, usize)>,
     Vec<(usize, usize, usize, usize)>,
 ) {
@@ -129,7 +131,7 @@ fn is_game_over(board: &Array2<i32>, player: i32) -> bool {
     false
 }
 
-fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
+fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
     // Check for game over
     if let Some(winner) = get_winner(board) {
         if winner == player {
@@ -139,7 +141,7 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
         }
     }
 
-    let mut score = 0;
+    let mut score = 0.0;
 
     // Iterate over the board and calculate features
     for ((row, col), &piece) in board.indexed_iter() {
@@ -149,9 +151,9 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
 
             // Advancement
             let advancement = if player == BLACK {
-                row as i32
+                row as f64
             } else {
-                (BOARD_SIZE - 1 - row) as i32
+                (BOARD_SIZE - 1 - row) as f64
             };
             score += weights.advancement_value * advancement;
 
@@ -159,15 +161,20 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
             if is_center_square(row, col) {
                 score += weights.center_control_value;
             }
+
+            // Edge pawn bonus
+            if is_edge_square(row, col) {
+                score += weights.edge_pawn_bonus;
+            }
         } else if piece == -player {
             // Opponent's material value
             score -= weights.piece_value;
 
             // Opponent's advancement
             let advancement = if player == BLACK {
-                (BOARD_SIZE - 1 - row) as i32
+                (BOARD_SIZE - 1 - row) as f64
             } else {
-                row as i32
+                row as f64
             };
             score -= weights.advancement_value * advancement;
 
@@ -175,19 +182,24 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> i32 {
             if is_center_square(row, col) {
                 score -= weights.center_control_value;
             }
+
+            // Opponent's edge pawn bonus
+            if is_edge_square(row, col) {
+                score -= weights.edge_pawn_bonus;
+            }
         }
     }
 
     // Mobility
-    let mobility = get_mobility(board, player);
+    let mobility = get_mobility(board, player) as f64;
     score += weights.mobility_value * mobility;
 
-    let opponent_mobility = get_mobility(board, -player);
+    let opponent_mobility = get_mobility(board, -player) as f64;
     score -= weights.mobility_value * opponent_mobility;
 
     // Unstoppable pawns
-    let ai_unstoppable_pawns = count_unstoppable_pawns(board, player);
-    let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player);
+    let ai_unstoppable_pawns = count_unstoppable_pawns(board, player) as f64;
+    let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player) as f64;
 
     score += ai_unstoppable_pawns * weights.unstoppable_pawn_bonus;
     score += opponent_unstoppable_pawns * weights.opponent_unstoppable_pawn_penalty;
@@ -203,6 +215,11 @@ fn is_center_square(row: usize, col: usize) -> bool {
 
     row >= center_start && row < center_end && col >= center_start && col < center_end
 }
+
+fn is_edge_square(row: usize, col: usize) -> bool {
+    col == 0 || col == BOARD_SIZE - 1
+}
+
 
 fn get_mobility(board: &Array2<i32>, player: i32) -> i32 {
     let moves = get_valid_moves(board, player);
