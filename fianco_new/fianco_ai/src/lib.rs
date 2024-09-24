@@ -158,9 +158,9 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
             score += weights.advancement_value * advancement;
 
             // Center control
-            if is_center_square(row, col) {
-                score += weights.center_control_value;
-            }
+            // if is_center_square(row, col) {
+            //     score += weights.center_control_value;
+            // }
 
             // Edge pawn bonus
             if is_edge_square(row, col) {
@@ -179,9 +179,9 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
             score -= weights.advancement_value * advancement;
 
             // Opponent's center control
-            if is_center_square(row, col) {
-                score -= weights.center_control_value;
-            }
+            // if is_center_square(row, col) {
+            //     score -= weights.center_control_value;
+            // }
 
             // Opponent's edge pawn bonus
             if is_edge_square(row, col) {
@@ -191,11 +191,11 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
     }
 
     // Mobility
-    let mobility = get_mobility(board, player) as f64;
-    score += weights.mobility_value * mobility;
+    // let mobility = get_mobility(board, player) as f64;
+    // score += weights.mobility_value * mobility;
 
-    let opponent_mobility = get_mobility(board, -player) as f64;
-    score -= weights.mobility_value * opponent_mobility;
+    // let opponent_mobility = get_mobility(board, -player) as f64;
+    // score -= weights.mobility_value * opponent_mobility;
 
     // Unstoppable pawns
     let ai_unstoppable_pawns = count_unstoppable_pawns(board, player) as f64;
