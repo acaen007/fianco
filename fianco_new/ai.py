@@ -4,7 +4,7 @@ import numpy as np
 import threading
 import time
 
-def get_best_move(game_state, max_depth, pv_callback):
+def get_best_move(game_state, max_depth, pv_callback, weights):
     board = game_state.board.astype(np.int32)
     player = game_state.current_player
     best_move = None
@@ -12,7 +12,7 @@ def get_best_move(game_state, max_depth, pv_callback):
 
     # Run negamax in a separate thread
     for depth in range(1, max_depth + 1):
-        best_move, evaluation, pv = negamax(board, depth, player)
+        best_move, evaluation, pv = negamax(board, depth, player, weights)
 
         # Adjust evaluation for consistency
         if player == BLACK:

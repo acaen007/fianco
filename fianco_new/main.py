@@ -19,6 +19,22 @@ font = pygame.font.Font(None, FONT_SIZE)
 
 HIGHLIGHT_COLOR = (0, 255, 0)  # Green
 
+class Weights:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+weights = Weights(
+    piece_value=10.0,
+    advancement_value=5.0,
+    unstoppable_pawn_bonus=100.0,
+    opponent_unstoppable_pawn_penalty=-100.0,
+    center_control_value=0.5,
+    mobility_value=3.0,
+    edge_pawn_bonus=2.0,
+    # Add more weights as needed
+)
+
+
 
 def draw_board(screen, game_state, possible_moves=None):
     # Draw the board grid
@@ -85,133 +101,6 @@ def draw_principal_variation(screen, pv_moves, game_state):
     screen.blit(text, (10, y_offset))
 
 
-# def main():
-#     game_state = GameState()
-#     selected_piece = None
-#     possible_moves = []
-#     ai_enabled = True  # Set to False if you want to play both sides
-#     running = True
-#     evaluation = 0
-
-
-#     ai_pv = []
-#     ai_thread = None
-#     evaluation = 0
-
-#     ai_move_event = threading.Event()
-#     ai_move = None
-
-#     # ai_pv = []
-
-
-#     # ai_thread = None
-#     # pv_lock = threading.Lock()
-
-#     def pv_callback(pv_moves):
-#         nonlocal ai_pv
-#         with pv_lock:
-#             ai_pv = pv_moves
-
-
-#     while running:
-#         screen.fill((255, 255, 255))
-#         draw_board(screen, game_state, possible_moves)
-#         draw_move_history(screen, game_state.move_history)
-#         draw_evaluation(screen, evaluation)
-#         restart_button_rect = draw_restart_button(screen)
-#         draw_principal_variation(screen, ai_pv, game_state)
-#         pygame.display.flip()
-
-#         if game_state.is_game_over():
-#             winner = 'Black' if game_state.winner == 1 else 'White' if game_state.winner == -1 else 'No one'
-#             print(f"Game Over! Winner: {winner}")
-#             running = False
-#             continue
-
-#         # Get valid moves and check for captures
-#         valid_moves = game_state.get_valid_moves()
-#         capture_available = any(abs(move[0][0] - move[1][0]) == 2 for move in valid_moves)
-
-
-#         if ai_enabled and game_state.current_player == BLACK and ai_thread is None:
-#             # Start AI thinking in a separate thread
-#             def ai_think():
-#                 nonlocal evaluation, ai_move
-#                 print("AI is thinking...")
-#                 # Use a copy of the game state to prevent conflicts
-#                 game_state_copy = game_state.copy()
-#                 move, evaluation = get_best_move(game_state_copy, depth=3, pv_callback=pv_callback)
-#                 print(f"AI move: {move}, evaluation: {evaluation}")
-#                 ai_move = move
-#                 ai_move_event.set()
-#                 # Reset the thread variable
-#                 nonlocal ai_thread
-#                 ai_thread = None
-#         # if ai_enabled and game_state.current_player == BLACK:
-#         #     move, evaluation = get_best_move(game_state, depth=3)
-#         #     if move:
-#         #         game_state.make_move(move)
-#         #     else:
-#         #         # No valid moves, game over
-#         #         game_state.winner = -game_state.current_player
-#         #     continue
-
-
-#         for event in pygame.event.get():
-#             if event.type == pygame.QUIT:
-#                 running = False
-#                 sys.exit()
-
-#             elif event.type == pygame.MOUSEBUTTONDOWN:
-#                 mouse_pos = pygame.mouse.get_pos()
-#                 if restart_button_rect.collidepoint(mouse_pos):
-#                     game_state.reset()
-#                     selected_piece = None
-#                     possible_moves = []
-#                     # evaluation = 0
-#                     # Update valid moves and capture availability after reset
-#                     valid_moves = game_state.get_valid_moves()
-#                     capture_available = any(abs(move[0][0] - move[1][0]) == 2 for move in valid_moves)
-#                     continue
-
-#                 col = mouse_pos[0] // CELL_SIZE
-#                 row = mouse_pos[1] // CELL_SIZE
-#                 if game_state.is_within_bounds(row, col):
-#                     if selected_piece:
-#                         move = (selected_piece, (row, col))
-#                         if move in possible_moves:
-#                             game_state.make_move(move)
-#                             selected_piece = None
-#                             possible_moves = []
-#                             # evaluation = 0
-#                             # Update valid moves and capture availability after move
-#                             valid_moves = game_state.get_valid_moves()
-#                             capture_available = any(abs(move[0][0] - move[1][0]) == 2 for move in valid_moves)
-#                         else:
-#                             selected_piece = None
-#                             possible_moves = []
-#                     elif game_state.board[row, col] == game_state.current_player:
-#                         piece_moves, piece_capture_moves = game_state.get_piece_moves((row, col))
-#                         if capture_available:
-#                             if piece_capture_moves:
-#                                 selected_piece = (row, col)
-#                                 possible_moves = piece_capture_moves
-#                             else:
-#                                 # Cannot select this piece as it cannot capture
-#                                 selected_piece = None
-#                                 possible_moves = []
-#                                 # Optionally, display a message to the player
-#                         else:
-#                             selected_piece = (row, col)
-#                             possible_moves = piece_moves
-#                     else:
-#                         selected_piece = None
-#                         possible_moves = []
-#             elif event.type == pygame.MOUSEBUTTONUP:
-#                 pass
-#         pygame.time.delay(10)
-#     pygame.quit()
-
 def main():
     game_state = GameState()
     selected_piece = None
@@ -234,7 +123,7 @@ def main():
         nonlocal evaluation, ai_move
         print("AI is thinking...")
         game_state_copy = game_state.copy()
-        move, evaluation = get_best_move(game_state_copy, 6, pv_callback=pv_callback)
+        move, evaluation = get_best_move(game_state_copy, 6, pv_callback=pv_callback, weights=weights)
         print(f"AI move: {move}, evaluation: {evaluation}")
         ai_move = move
         ai_move_event.set()

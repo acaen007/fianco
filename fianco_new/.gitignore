@@ -2,3 +2,4 @@
 /metadata/
 *.lock
 *.log
+target/
