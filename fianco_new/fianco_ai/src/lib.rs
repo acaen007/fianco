@@ -1,10 +1,14 @@
 // src/lib.rs
+
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
-use pyo3::exceptions::PyKeyError;
 use pyo3::FromPyObject;
 use numpy::PyReadonlyArray2;
 use ndarray::Array2;
+use std::collections::HashMap;
+use rand::Rng;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
 
 const BOARD_SIZE: usize = 9;
 const EMPTY: i32 = 0;
@@ -14,6 +18,19 @@ const WHITE: i32 = -1;
 const WIN_SCORE: f64 = 1_000_000.0;
 const LOSE_SCORE: f64 = -1_000_000.0;
 
+// Transposition Table Entry
+struct TranspositionTableEntry {
+    depth: i32,
+    value: f64,
+    flag: NodeType,
+    best_move: Option<(usize, usize, usize, usize)>,
+}
+
+enum NodeType {
+    Exact,
+    LowerBound,
+    UpperBound,
+}
 
 #[derive(Debug, FromPyObject)]
 struct Weights {
@@ -31,16 +48,76 @@ struct Weights {
 fn negamax(
     _py: Python,
     board: PyReadonlyArray2<i32>,
-    depth: i32,
+    max_depth: i32,
     player: i32,
     weights: &PyAny,
+    time_limit: f64, // Time limit in seconds
 ) -> PyResult<(Option<(i32, i32, i32, i32)>, f64, Vec<(i32, i32, i32, i32)>)> {
     let board_array = board.as_array().to_owned();
 
     let weights: Weights = weights.extract()?;
 
-    let (evaluation, best_move, pv) =
-        negamax_search(board_array, depth, player, f64::NEG_INFINITY, f64::INFINITY, &weights);
+    // Initialize Zobrist table
+    let zobrist_table = initialize_zobrist_table();
+
+    // Compute initial hash
+    let initial_hash = compute_zobrist_hash(&board_array, &zobrist_table);
+
+    // Initialize transposition table
+    let mut transposition_table = HashMap::new();
+
+    // Initialize position counts for threefold repetition detection
+    let mut position_counts = HashMap::new();
+
+    // Start timing
+    let start_time = Instant::now();
+    let time_limit = Duration::from_secs_f64(time_limit);
+
+    let mut best_move = None;
+    let mut evaluation = 0.0;
+    let mut pv = Vec::new();
+
+    // Iterative Deepening Loop
+    for depth in 1..=max_depth {
+        // Check if time limit exceeded
+        if start_time.elapsed() >= time_limit {
+            break;
+        }
+
+        // Reset position counts for each iteration
+        position_counts.clear();
+        position_counts.insert(initial_hash, 1);
+
+        let (eval, mv, principal_variation) = negamax_search(
+            &board_array,
+            depth,
+            player,
+            f64::NEG_INFINITY,
+            f64::INFINITY,
+            &weights,
+            initial_hash,
+            &zobrist_table,
+            &mut transposition_table,
+            &mut position_counts,
+            &start_time,
+            time_limit,
+            best_move, // Pass the best move from previous iteration
+        );
+
+        // Check if time limit exceeded during search
+        if start_time.elapsed() >= time_limit {
+            break;
+        }
+
+        if mv.is_some() {
+            evaluation = eval;
+            best_move = mv;
+            pv = principal_variation;
+        } else {
+            // If no move was found (possibly due to timeout), break
+            break;
+        }
+    }
 
     let py_move = best_move.map(|(fr, fc, tr, tc)| {
         (fr as i32, fc as i32, tr as i32, tc as i32)
@@ -55,44 +132,181 @@ fn negamax(
 }
 
 fn negamax_search(
-    board: Array2<i32>,
+    board: &Array2<i32>,
     depth: i32,
     player: i32,
     mut alpha: f64,
-    beta: f64,
+    mut beta: f64,
     weights: &Weights,
+    zobrist_hash: u64,
+    zobrist_table: &[[[u64; 3]; BOARD_SIZE]; BOARD_SIZE],
+    transposition_table: &mut HashMap<u64, TranspositionTableEntry>,
+    position_counts: &mut HashMap<u64, i32>,
+    start_time: &Instant,
+    time_limit: Duration,
+    first_move: Option<(usize, usize, usize, usize)>, // Best move from previous iteration
 ) -> (
     f64,
     Option<(usize, usize, usize, usize)>,
     Vec<(usize, usize, usize, usize)>,
 ) {
-    if depth == 0 || get_winner(&board).is_some() {
-        let evaluation = evaluate_board(&board, player, weights);
+    // Check if time limit exceeded
+    if start_time.elapsed() >= time_limit {
+        return (0.0, None, Vec::new()); // Return default value on timeout
+    }
+
+    // Threefold repetition detection
+    {
+        let count = position_counts.entry(zobrist_hash).or_insert(0);
+        *count += 1;
+        if *count >= 3 {
+            *count -= 1; // Decrement before returning
+            if *count == 0 {
+                position_counts.remove(&zobrist_hash);
+            }
+            return (0.0, None, Vec::new());
+        }
+    } // Mutable borrow ends here
+
+    // Transposition Table Lookup
+    if let Some(entry) = transposition_table.get(&zobrist_hash) {
+        if entry.depth >= depth {
+            match entry.flag {
+                NodeType::Exact => {
+                    // Decrement the position count before returning
+                    {
+                        let count = position_counts.get_mut(&zobrist_hash).unwrap();
+                        *count -= 1;
+                        if *count == 0 {
+                            position_counts.remove(&zobrist_hash);
+                        }
+                    }
+                    return (entry.value, entry.best_move, Vec::new());
+                },
+                NodeType::LowerBound => alpha = alpha.max(entry.value),
+                NodeType::UpperBound => beta = beta.min(entry.value),
+            }
+            if alpha >= beta {
+                // Decrement the position count before returning
+                {
+                    let count = position_counts.get_mut(&zobrist_hash).unwrap();
+                    *count -= 1;
+                    if *count == 0 {
+                        position_counts.remove(&zobrist_hash);
+                    }
+                }
+                return (entry.value, entry.best_move, Vec::new());
+            }
+        }
+    }
+
+    // Terminal Node Check
+    if depth == 0 || get_winner(board).is_some() {
+        let evaluation = evaluate_board(board, player, weights);
+        // Decrement the position count before returning
+        {
+            let count = position_counts.get_mut(&zobrist_hash).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                position_counts.remove(&zobrist_hash);
+            }
+        }
         return (evaluation, None, Vec::new());
     }
 
-    let moves = get_valid_moves(&board, player);
+    let alpha_orig = alpha;
+
+    // Generate Valid Moves
+    let moves = get_valid_moves(board, player);
 
     if moves.is_empty() {
         // No moves available, losing position
+        // Decrement the position count before returning
+        {
+            let count = position_counts.get_mut(&zobrist_hash).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                position_counts.remove(&zobrist_hash);
+            }
+        }
         return (LOSE_SCORE, None, Vec::new());
     }
+
+    // Move Ordering
+    let mut ordered_moves = Vec::new();
+    let mut added_moves = HashSet::new();
+
+    // Convert moves to HashSet for quick lookup
+    let moves_set: HashSet<_> = moves.iter().cloned().collect();
+
+    // 1. Try first_move if provided
+    if let Some(mv) = first_move {
+        if moves_set.contains(&mv) {
+            ordered_moves.push(mv);
+            added_moves.insert(mv);
+        }
+    }
+
+    // 2. Try best_move from transposition table
+    if let Some(entry) = transposition_table.get(&zobrist_hash) {
+        if let Some(best_move) = entry.best_move {
+            if Some(best_move) != first_move && moves_set.contains(&best_move) {
+                ordered_moves.push(best_move);
+                added_moves.insert(best_move);
+            }
+        }
+    }
+
+    // 3. Separate remaining moves into capture and non-capture moves
+    let mut capture_moves = Vec::new();
+    let mut non_capture_moves = Vec::new();
+
+    for mv in moves {
+        if added_moves.contains(&mv) {
+            continue; // Already added
+        }
+
+        if is_capture_move(board, &mv, player) {
+            capture_moves.push(mv);
+        } else {
+            non_capture_moves.push(mv);
+        }
+    }
+
+    // 4. Append capture moves and non_capture moves
+    ordered_moves.extend(capture_moves);
+    ordered_moves.extend(non_capture_moves);
 
     let mut max_eval = LOSE_SCORE;
     let mut best_move = None;
     let mut pv_line = Vec::new();
 
-    for mv in moves {
+    // Search through ordered moves
+    for mv in ordered_moves {
+        // Check if time limit exceeded
+        if start_time.elapsed() >= time_limit {
+            break;
+        }
+
         let mut new_board = board.clone();
-        make_move(&mut new_board, &mv, player);
+        let mut new_hash = zobrist_hash;
+
+        let _captured_piece = make_move(&mut new_board, &mv, player, &mut new_hash, zobrist_table);
 
         let (eval, _, child_pv) = negamax_search(
-            new_board,
+            &new_board,
             depth - 1,
             -player,
             -beta,
             -alpha,
-            weights, // Pass weights recursively
+            weights,
+            new_hash,
+            zobrist_table,
+            transposition_table,
+            position_counts,
+            start_time,
+            time_limit,
+            None, // No specific move ordering in deeper levels
         );
         let eval = -eval;
 
@@ -110,25 +324,111 @@ fn negamax_search(
         }
     }
 
+    // Store in Transposition Table
+    let flag = if max_eval <= alpha_orig {
+        NodeType::UpperBound
+    } else if max_eval >= beta {
+        NodeType::LowerBound
+    } else {
+        NodeType::Exact
+    };
+
+    let entry = TranspositionTableEntry {
+        depth,
+        value: max_eval,
+        flag,
+        best_move,
+    };
+
+    transposition_table.insert(zobrist_hash, entry);
+
+    // Decrement the position count before returning
+    {
+        let count = position_counts.get_mut(&zobrist_hash).unwrap();
+        *count -= 1;
+        if *count == 0 {
+            position_counts.remove(&zobrist_hash);
+        }
+    }
+
     (max_eval, best_move, pv_line)
 }
 
-fn is_game_over(board: &Array2<i32>, player: i32) -> bool {
-    // Check for victory condition: if a player's piece reaches the opponent's back row
-    if player == BLACK {
+
+
+fn initialize_zobrist_table() -> [[[u64; 3]; BOARD_SIZE]; BOARD_SIZE] {
+    let mut zobrist_table = [[[0u64; 3]; BOARD_SIZE]; BOARD_SIZE];
+    let mut rng = rand::thread_rng();
+    for row in 0..BOARD_SIZE {
         for col in 0..BOARD_SIZE {
-            if board[[BOARD_SIZE - 1, col]] == BLACK {
-                return true;
-            }
-        }
-    } else {
-        for col in 0..BOARD_SIZE {
-            if board[[0, col]] == WHITE {
-                return true;
+            for piece in 0..3 {
+                zobrist_table[row][col][piece] = rng.gen();
             }
         }
     }
-    false
+    zobrist_table
+}
+
+fn piece_index(piece: i32) -> usize {
+    match piece {
+        BLACK => 1,
+        WHITE => 2,
+        _ => 0, // EMPTY
+    }
+}
+
+fn compute_zobrist_hash(board: &Array2<i32>, zobrist_table: &[[[u64; 3]; BOARD_SIZE]; BOARD_SIZE]) -> u64 {
+    let mut hash: u64 = 0;
+    for ((row, col), &piece) in board.indexed_iter() {
+        let piece_idx = piece_index(piece);
+        if piece_idx != 0 {
+            hash ^= zobrist_table[row][col][piece_idx];
+        }
+    }
+    hash
+}
+
+
+fn is_capture_move(board: &Array2<i32>, mv: &(usize, usize, usize, usize), player: i32) -> bool {
+    let (from_row, _from_col, to_row, _to_col) = *mv;
+    let delta_row = (to_row as isize - from_row as isize).abs();
+    delta_row == 2 // Capture moves involve jumping over an opponent's piece
+}
+
+fn make_move(
+    board: &mut Array2<i32>,
+    mv: &(usize, usize, usize, usize),
+    player: i32,
+    zobrist_hash: &mut u64,
+    zobrist_table: &[[[u64; 3]; BOARD_SIZE]; BOARD_SIZE],
+) -> i32 {
+    let (from_row, from_col, to_row, to_col) = *mv;
+
+    let from_piece = board[[from_row, from_col]];
+    let to_piece = board[[to_row, to_col]]; // Should be EMPTY
+
+    // Remove piece from old position
+    *zobrist_hash ^= zobrist_table[from_row][from_col][piece_index(from_piece)];
+    // Place piece at new position
+    *zobrist_hash ^= zobrist_table[to_row][to_col][piece_index(from_piece)];
+
+    // Update the board
+    board[[to_row, to_col]] = from_piece;
+    board[[from_row, from_col]] = EMPTY;
+
+    let mut captured_piece = EMPTY;
+
+    // Check if it's a capture
+    if (from_row as isize - to_row as isize).abs() == 2 {
+        let mid_row = (from_row + to_row) / 2;
+        let mid_col = (from_col + to_col) / 2;
+        captured_piece = board[[mid_row, mid_col]];
+        // Remove captured piece
+        *zobrist_hash ^= zobrist_table[mid_row][mid_col][piece_index(captured_piece)];
+        board[[mid_row, mid_col]] = EMPTY;
+    }
+
+    captured_piece
 }
 
 fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
@@ -157,11 +457,6 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
             };
             score += weights.advancement_value * advancement;
 
-            // Center control
-            // if is_center_square(row, col) {
-            //     score += weights.center_control_value;
-            // }
-
             // Edge pawn bonus
             if is_edge_square(row, col) {
                 score += weights.edge_pawn_bonus;
@@ -178,11 +473,6 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
             };
             score -= weights.advancement_value * advancement;
 
-            // Opponent's center control
-            // if is_center_square(row, col) {
-            //     score -= weights.center_control_value;
-            // }
-
             // Opponent's edge pawn bonus
             if is_edge_square(row, col) {
                 score -= weights.edge_pawn_bonus;
@@ -190,42 +480,47 @@ fn evaluate_board(board: &Array2<i32>, player: i32, weights: &Weights) -> f64 {
         }
     }
 
-    // Mobility
-    // let mobility = get_mobility(board, player) as f64;
-    // score += weights.mobility_value * mobility;
-
-    // let opponent_mobility = get_mobility(board, -player) as f64;
-    // score -= weights.mobility_value * opponent_mobility;
-
     // Unstoppable pawns
-    let ai_unstoppable_pawns = count_unstoppable_pawns(board, player) as f64;
-    let opponent_unstoppable_pawns = count_unstoppable_pawns(board, -player) as f64;
+    let ai_unstoppable_pawns = get_unstoppable_pawns_steps(board, player);
+    let opponent_unstoppable_pawns = get_unstoppable_pawns_steps(board, -player);
 
-    score += ai_unstoppable_pawns * weights.unstoppable_pawn_bonus;
-    score += opponent_unstoppable_pawns * weights.opponent_unstoppable_pawn_penalty;
+    // Evaluate our unstoppable pawns
+    for steps in ai_unstoppable_pawns.iter() {
+        let bonus = weights.unstoppable_pawn_bonus / (*steps as f64 + 1.0);
+        score += bonus;
+    }
+
+    // Evaluate opponent's unstoppable pawns
+    for steps in opponent_unstoppable_pawns.iter() {
+        let penalty = weights.opponent_unstoppable_pawn_penalty / (*steps as f64 + 1.0);
+        score += penalty; // Since penalty is negative
+    }
+
+    // Additional logic to prioritize pawns that promote sooner
+    if let Some(&min_ai_steps) = ai_unstoppable_pawns.iter().min() {
+        if let Some(&min_opponent_steps) = opponent_unstoppable_pawns.iter().min() {
+            if min_opponent_steps < min_ai_steps {
+                // Opponent pawn promotes before ours
+                score += weights.opponent_unstoppable_pawn_penalty * 2.0;
+            } else if min_ai_steps < min_opponent_steps {
+                // Our pawn promotes before opponent's
+                score += weights.unstoppable_pawn_bonus * 2.0;
+            }
+        }
+    } else if opponent_unstoppable_pawns.is_empty() && !ai_unstoppable_pawns.is_empty() {
+        // Only we have unstoppable pawns
+        score += weights.unstoppable_pawn_bonus * 2.0;
+    } else if ai_unstoppable_pawns.is_empty() && !opponent_unstoppable_pawns.is_empty() {
+        // Only opponent has unstoppable pawns
+        score += weights.opponent_unstoppable_pawn_penalty * 2.0;
+    }
 
     score
-}
-
-
-fn is_center_square(row: usize, col: usize) -> bool {
-    // Define center squares (e.g., the middle 3x3 squares for a 9x9 board)
-    let center_start = BOARD_SIZE / 3;
-    let center_end = BOARD_SIZE - center_start;
-
-    row >= center_start && row < center_end && col >= center_start && col < center_end
 }
 
 fn is_edge_square(row: usize, col: usize) -> bool {
     col == 0 || col == BOARD_SIZE - 1
 }
-
-
-fn get_mobility(board: &Array2<i32>, player: i32) -> i32 {
-    let moves = get_valid_moves(board, player);
-    moves.len() as i32
-}
-
 
 fn get_winner(board: &Array2<i32>) -> Option<i32> {
     // Check if BLACK has won
@@ -262,8 +557,6 @@ fn get_winner(board: &Array2<i32>) -> Option<i32> {
 
     None
 }
-
-
 
 fn get_valid_moves(board: &Array2<i32>, player: i32) -> Vec<(usize, usize, usize, usize)> {
     let mut moves = Vec::new();
@@ -349,36 +642,25 @@ fn get_piece_moves(
     (moves, Vec::new())
 }
 
-
-fn make_move(board: &mut Array2<i32>, mv: &(usize, usize, usize, usize), _player: i32) {
-    let (from_row, from_col, to_row, to_col) = *mv;
-
-    // Check if it's a capture
-    if (from_row as isize - to_row as isize).abs() == 2 {
-        let mid_row = (from_row + to_row) / 2;
-        let mid_col = (from_col + to_col) / 2;
-        board[[mid_row, mid_col]] = EMPTY;
-    }
-
-    board[[to_row, to_col]] = board[[from_row, from_col]];
-    board[[from_row, from_col]] = EMPTY;
+fn is_within_bounds(row: isize, col: isize) -> bool {
+    row >= 0 && row < BOARD_SIZE as isize && col >= 0 && col < BOARD_SIZE as isize
 }
 
-fn count_unstoppable_pawns(board: &Array2<i32>, player: i32) -> i32 {
-    let mut count = 0;
-
+fn get_opponent_pawns_by_row(board: &Array2<i32>, opponent: i32) -> Vec<Vec<usize>> {
+    let mut pawns_by_row: Vec<Vec<usize>> = vec![Vec::new(); BOARD_SIZE];
     for ((row, col), &piece) in board.indexed_iter() {
-        if piece == player {
-            if is_unstoppable_pawn(board, (row, col), player) {
-                count += 1;
-            }
+        if piece == opponent {
+            pawns_by_row[row].push(col);
         }
     }
-
-    count
+    pawns_by_row
 }
 
-fn is_unstoppable_pawn(board: &Array2<i32>, pawn_pos: (usize, usize), player: i32) -> bool {
+fn is_unstoppable_pawn(
+    pawn_pos: (usize, usize),
+    player: i32,
+    opponent_pawns_by_row: &Vec<Vec<usize>>,
+) -> Option<isize> {
     let (row_pawn, col_pawn) = pawn_pos;
     let row_pawn = row_pawn as isize;
     let col_pawn = col_pawn as isize;
@@ -387,36 +669,59 @@ fn is_unstoppable_pawn(board: &Array2<i32>, pawn_pos: (usize, usize), player: i3
 
     let steps_to_goal = (row_goal - row_pawn).abs();
 
-    // For each opponent pawn
-    for ((row_opp, col_opp), &piece) in board.indexed_iter() {
-        if piece == -player {
-            let row_opp = row_opp as isize;
-            let col_opp = col_opp as isize;
+    // Only check rows ahead of the pawn
+    let row_range = if player == BLACK {
+        (row_pawn + 1) as usize..BOARD_SIZE
+    } else {
+        0..(row_pawn as usize)
+    };
 
-            // Check if opponent pawn is ahead of the pawn
-            let relative_row = (row_opp - row_pawn) * direction;
-            if relative_row <= 0 {
-                // Opponent pawn is not ahead
-                continue;
-            }
+    for row in row_range {
+        let relative_row = (row as isize - row_pawn) * direction;
+        let steps_to_opp = relative_row;
+        if steps_to_opp <= 0 {
+            continue;
+        }
 
-            let steps_to_opp = relative_row;
-            let col_diff = (col_opp - col_pawn).abs();
+        // If steps to opponent pawn exceed steps to goal, they can't stop us
+        if steps_to_opp > steps_to_goal {
+            break;
+        }
 
+        for &col_opp in &opponent_pawns_by_row[row] {
+            let col_diff = (col_opp as isize - col_pawn).abs();
             if col_diff <= steps_to_opp {
-                // Opponent pawn is within triangle
-                return false; // Pawn is stoppable
+                // Opponent pawn can reach our pawn
+                return None;
             }
         }
     }
 
-    // No opponent pawns within the triangle
-    return true; // Pawn is unstoppable
+    // No opponent pawns can stop this pawn
+    Some(steps_to_goal)
 }
 
+fn get_unstoppable_pawns_steps(
+    board: &Array2<i32>,
+    player: i32,
+) -> Vec<isize> {
+    let opponent = -player;
+    let opponent_pawns_by_row = get_opponent_pawns_by_row(board, opponent);
+    let mut steps_list = Vec::new();
 
-fn is_within_bounds(row: isize, col: isize) -> bool {
-    row >= 0 && row < BOARD_SIZE as isize && col >= 0 && col < BOARD_SIZE as isize
+    for ((row, col), &piece) in board.indexed_iter() {
+        if piece == player {
+            if let Some(steps_to_goal) = is_unstoppable_pawn(
+                (row, col),
+                player,
+                &opponent_pawns_by_row,
+            ) {
+                steps_list.push(steps_to_goal);
+            }
+        }
+    }
+
+    steps_list
 }
 
 #[pymodule]
