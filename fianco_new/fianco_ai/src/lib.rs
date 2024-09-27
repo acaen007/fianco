@@ -77,6 +77,32 @@ fn negamax(
     let mut evaluation = 0.0;
     let mut pv = Vec::new();
 
+    // Get all valid moves in the current position
+    let (capture_moves, normal_moves) = get_all_valid_moves(&board_array, player);
+
+    if !capture_moves.is_empty() {
+        // There are capture moves
+        if capture_moves.len() == 1 {
+            // Only one capture move, play it immediately
+            let mv = capture_moves[0];
+            let evaluation = evaluate_board(&board_array, player, &weights);
+            let py_move = Some((mv.0 as i32, mv.1 as i32, mv.2 as i32, mv.3 as i32));
+            let py_pv = vec![py_move.unwrap()];
+            return Ok((py_move, evaluation, py_pv));
+        }
+    } else {
+        // No capture moves
+        if normal_moves.len() == 1 {
+            // Only one normal move, play it immediately
+            let mv = normal_moves[0];
+            let evaluation = evaluate_board(&board_array, player, &weights);
+            let py_move = Some((mv.0 as i32, mv.1 as i32, mv.2 as i32, mv.3 as i32));
+            let py_pv = vec![py_move.unwrap()];
+            return Ok((py_move, evaluation, py_pv));
+        }
+    }
+
+
     // Iterative Deepening Loop
     for depth in 1..=max_depth {
         // Check if time limit exceeded
@@ -577,6 +603,29 @@ fn get_valid_moves(board: &Array2<i32>, player: i32) -> Vec<(usize, usize, usize
     } else {
         moves
     }
+}
+
+fn get_all_valid_moves(
+    board: &Array2<i32>,
+    player: i32,
+) -> (
+    Vec<(usize, usize, usize, usize)>, // Capture moves
+    Vec<(usize, usize, usize, usize)>, // Normal moves
+) {
+    let mut normal_moves = Vec::new();
+    let mut capture_moves = Vec::new();
+
+    for row in 0..BOARD_SIZE {
+        for col in 0..BOARD_SIZE {
+            if board[[row, col]] == player {
+                let (piece_moves, piece_capture_moves) = get_piece_moves(board, (row, col), player);
+                normal_moves.extend(piece_moves);
+                capture_moves.extend(piece_capture_moves);
+            }
+        }
+    }
+
+    (capture_moves, normal_moves)
 }
 
 fn get_piece_moves(
